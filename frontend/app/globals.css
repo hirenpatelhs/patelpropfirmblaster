@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+:root {
+  --background: #080b0f;
+  --foreground: #edf2f7;
+  --panel: #0d1218;
+  --panel-2: #111820;
+  --border: #202a35;
+  --muted: #8693a2;
+  --green: #2de3a1;
+  --amber: #f0b45d;
+  --red: #ff6577;
+  --cyan: #58c8e8;
+}
+
+* { border-color: var(--border); }
+html { background: var(--background); }
+body { background: radial-gradient(circle at 72% -10%, rgba(45,227,161,.07), transparent 30%), var(--background); color: var(--foreground); }
+button, a { -webkit-tap-highlight-color: transparent; }
+button:focus-visible, a:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-thumb { background: #26313d; border-radius: 10px; }
+
+@keyframes pulse-dot { 0%,100% { opacity: 1; box-shadow: 0 0 0 0 rgba(45,227,161,.35); } 50% { opacity:.75; box-shadow: 0 0 0 6px rgba(45,227,161,0); } }
+.pulse-dot { animation: pulse-dot 2.2s ease-in-out infinite; }
