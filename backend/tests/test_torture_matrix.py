@@ -125,6 +125,19 @@ def test_contextual_book_partial_and_be_executes_both_actions() -> None:
     assert [event["action"] for event in recorder.events] == ["MANUAL_PARTIAL", "BREAK_EVEN_MOVED"]
 
 
+def test_fred_compound_tp1_and_sl_entry_executes_both_actions() -> None:
+    broker = connected_broker()
+    run = ShadowTradingEngine().route(four_tp_signal(), [ShadowAccount("account", broker)])
+    position = next(iter(run.positions.values()))
+    recorder = LifecycleRecorder()
+    manager = PositionManagementService(broker, recorder)
+    update = parser.parse_update("TP1 Hit ✅. SL entry.")
+    application = apply_position_update(manager, position, update)
+    assert application.successful and len(application.results) == 2
+    assert position.targets[0].status == TargetStatus.EXECUTED
+    assert position.stop_loss == position.entry_price
+
+
 def test_close_gold_with_two_active_gold_signals_fails_ambiguous() -> None:
     now = datetime.now(timezone.utc)
     update = parser.parse_update("CLOSE GOLD NOW")
@@ -142,7 +155,8 @@ def test_restart_restores_executed_tp_and_does_not_close_it_twice() -> None:
     position = managed_position_from_plan(opened.broker_order_id or "", "signal", "XAUUSD", Direction.BUY, opened.fill_price or Decimal("100.20"), Decimal("99"), plan)
     manager = PositionManagementService(broker)
     broker.set_price("XAUUSD", Decimal("101.20"), Decimal("101.40"))
-    assert len(manager.monitor(position)) == 1
+    assert len(manager.monitor(position)) == 2
+    assert position.stop_loss == position.entry_price
     remaining = position.remaining_volume
 
     restored_broker = connected_broker(bid="101.20", ask="101.40")
@@ -153,8 +167,9 @@ def test_restart_restores_executed_tp_and_does_not_close_it_twice() -> None:
     assert restored_manager.monitor(restored) == []
     assert restored.remaining_volume == remaining
     restored_broker.set_price("XAUUSD", Decimal("102.20"), Decimal("102.40"))
-    assert len(restored_manager.monitor(restored)) == 1
+    assert len(restored_manager.monitor(restored)) == 2
     assert [target.status for target in restored.targets[:2]] == [TargetStatus.EXECUTED, TargetStatus.EXECUTED]
+    assert restored.stop_loss == Decimal("101")
 
 
 @pytest.mark.parametrize("mapped", ["GOLD", "XAUUSD.a"])
@@ -216,10 +231,68 @@ def test_price_gap_through_tp1_and_tp2_executes_both_once_in_order() -> None:
     recorder = run.recorders[position.position_id]
     manager = PositionManagementService(broker, recorder)
     broker.set_price("XAUUSD", Decimal("102.50"), Decimal("102.70"))
-    assert len(manager.monitor(position)) == 2
+    assert len(manager.monitor(position)) == 4
     assert manager.monitor(position) == []
     executed = [event["sequence"] for event in recorder.events if event["action"] == "VIRTUAL_TP_EXECUTED"]
     assert executed == [1, 2]
+    assert position.stop_loss == Decimal("101")
+
+
+def test_broker_side_take_profit_is_final_tp4() -> None:
+    broker = connected_broker()
+    run = ShadowTradingEngine().route(four_tp_signal(), [ShadowAccount("account", broker)])
+    position = next(iter(run.positions.values()))
+    assert broker.positions[position.position_id]["take_profit"] == Decimal("104")
+
+
+def test_fred_full_virtual_plan_closes_40_20_20_20_and_trails_stop() -> None:
+    broker = connected_broker()
+    plan = allocate_take_profits(Decimal("0.10"), [Decimal("101"), Decimal("102"), Decimal("103"), Decimal("104")], Decimal("0.01"), Decimal("0.01"))
+    opened = broker.place_order(OrderRequest("fred-plan", "XAUUSD", Direction.BUY, OrderType.MARKET, Decimal("0.10"), Decimal("99"), Decimal("104")))
+    position = managed_position_from_plan(opened.broker_order_id or "", "signal", "XAUUSD", Direction.BUY, opened.fill_price or Decimal("100.20"), Decimal("99"), plan)
+    manager = PositionManagementService(broker)
+    remaining: list[Decimal] = []
+    stops: list[Decimal] = []
+    for price in (Decimal("101"), Decimal("102"), Decimal("103"), Decimal("104")):
+        broker.set_price("XAUUSD", price, price + Decimal("0.20"))
+        assert all(result.accepted for result in manager.monitor(position))
+        remaining.append(position.remaining_volume)
+        stops.append(position.stop_loss)
+    assert [target.allocated_volume for target in position.targets] == [Decimal("0.04"), Decimal("0.02"), Decimal("0.02"), Decimal("0.02")]
+    assert remaining == [Decimal("0.06"), Decimal("0.04"), Decimal("0.02"), Decimal("0")]
+    assert stops[:3] == [position.entry_price, Decimal("101"), Decimal("101")]
+    assert position.status == "CLOSED"
+
+
+def test_stop_guard_rejects_backward_moves_for_buy_and_sell() -> None:
+    broker = connected_broker()
+    buy_opened = broker.place_order(OrderRequest("guard-buy", "XAUUSD", Direction.BUY, OrderType.MARKET, Decimal("0.10"), Decimal("99"), None))
+    sell_opened = broker.place_order(OrderRequest("guard-sell", "XAUUSD", Direction.SELL, OrderType.MARKET, Decimal("0.10"), Decimal("102"), None))
+    plan = allocate_take_profits(Decimal("0.10"), [Decimal("101")], Decimal("0.01"), Decimal("0.01"))
+    buy = managed_position_from_plan(buy_opened.broker_order_id or "", "buy", "XAUUSD", Direction.BUY, buy_opened.fill_price or Decimal("100.20"), Decimal("99"), plan)
+    sell = managed_position_from_plan(sell_opened.broker_order_id or "", "sell", "XAUUSD", Direction.SELL, sell_opened.fill_price or Decimal("100"), Decimal("102"), plan)
+    manager = PositionManagementService(broker)
+    assert manager.move_stop(buy, Decimal("98")).code == "WORSENS_STOP"
+    assert manager.move_stop(sell, Decimal("103")).code == "WORSENS_STOP"
+
+
+@pytest.mark.asyncio
+async def test_missing_telegram_heartbeat_fails_closed(monkeypatch) -> None:
+    from app.workers import pipeline
+
+    class FakeRedis:
+        @classmethod
+        def from_url(cls, *_args, **_kwargs):
+            return cls()
+
+        async def get(self, _key):
+            return None
+
+        async def aclose(self):
+            return None
+
+    monkeypatch.setattr(pipeline, "Redis", FakeRedis)
+    assert not await pipeline.telegram_listener_healthy()
 
 
 class FakeRedis:

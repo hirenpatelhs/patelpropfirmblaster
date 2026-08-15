@@ -57,6 +57,16 @@ def test_shadow_never_submits_to_live_adapter() -> None:
     assert result.code == "SHADOW_GUARD"
 
 
+def test_live_mode_remains_explicitly_disabled() -> None:
+    broker = MockBrokerAdapter()
+    broker.connect()
+    engine = ExecutionEngine()
+    preflight = engine.preflight(signal(), broker, risk(), True, True)
+    result = engine.execute(signal(), broker, preflight, "live-key", TradingMode.LIVE)
+    assert not result.accepted
+    assert result.code == "LIVE_GUARD"
+
+
 def test_reconciliation_detects_volume_stop_and_tp_mismatches() -> None:
     broker = MockBrokerAdapter()
     broker.connect()

@@ -12,6 +12,7 @@ from app.auth.dependencies import admin_user, current_user
 from app.core.enums import Decision, Direction, TradingMode
 from app.database.session import get_db
 from app.models.entities import AccountDailyStat, AccountSetting, AuditLog, Order, Position, PositionEvent, PositionTarget, PropRuleProfile, Signal, SignalAccountDecision, TelegramSource, Trade, TradingAccount, User
+from app.notifications.service import queue_notification
 from app.risk.drawdown import calculate_drawdown
 from app.workers.pipeline import broker_registry
 
@@ -239,4 +240,12 @@ def _restore_shadow_position(account: TradingAccount, row: Position):
 
 async def _record_action(db: AsyncSession, user: User, row: Position, action: str, before: dict[str, Any], after: dict[str, Any]) -> None:
     db.add_all([PositionEvent(position_id=row.id, correlation_id=row.correlation_id, timestamp=datetime.now(timezone.utc), event=action, payload=after), AuditLog(timestamp=datetime.now(timezone.utc), correlation_id=row.correlation_id, user_id=user.id, action=action, entity="position", entity_id=str(row.id), before=before, after=after, metadata_json={"shadow": True})])
+    details = ", ".join(f"{key}={value}" for key, value in after.items())
+    queue_notification(
+        db,
+        "INFO",
+        action.replace("_", " ").title(),
+        f"{row.direction.value} {row.symbol}: {details}.",
+        row.correlation_id,
+    )
     await db.commit()

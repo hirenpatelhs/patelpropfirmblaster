@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from app.signal_parser.parser import DeterministicSignalParser
+from app.signal_parser.parser import DeterministicSignalParser, ManualReviewRequired
 
 
 CASES = [json.loads(line) for path in (Path(__file__).parent / "fixtures" / "guru").glob("*.jsonl") for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -19,6 +19,15 @@ def test_anonymized_guru_regression_case(case: dict[str, object]) -> None:
         assert signal.direction.value == expected["direction"]
         assert signal.risk_classification.value == expected["risk_classification"]
         assert [str(target) for target in signal.take_profits] == expected["targets"]
+        if "entry_price" in expected:
+            assert str(signal.entry_price) == expected["entry_price"]
+        if "stop_loss" in expected:
+            assert str(signal.stop_loss) == expected["stop_loss"]
+        if "risk_hint" in expected:
+            assert signal.risk_hint == expected["risk_hint"]
+    elif case["expected_kind"] == "MANUAL_REVIEW":
+        with pytest.raises(ManualReviewRequired, match=str(expected["reason_contains"])):
+            parser.parse_update(str(case["text"]))
     else:
         update = parser.parse_update(str(case["text"]))
         for key, value in expected.items():

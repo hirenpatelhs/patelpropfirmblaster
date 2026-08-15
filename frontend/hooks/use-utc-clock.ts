@@ -3,9 +3,17 @@
 import { useEffect, useState } from "react";
 
 export function useUtcClock(): string {
-  const [time, setTime] = useState("--:--:-- UTC");
+  const [time, setTime] = useState("--:--:-- London");
   useEffect(() => {
-    const update = () => setTime(`${new Date().toISOString().slice(11, 19)} UTC`);
+    const formatter = new Intl.DateTimeFormat("en-GB", {
+      timeZone: "Europe/London",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+      timeZoneName: "short",
+    });
+    const update = () => setTime(formatter.format(new Date()));
     update();
     const timer = window.setInterval(update, 1000);
     return () => window.clearInterval(timer);

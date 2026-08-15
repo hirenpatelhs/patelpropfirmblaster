@@ -12,9 +12,9 @@ class ReconciliationIssue:
     detail: str
 
 
-def reconcile_positions(database_positions: list[dict[str, Any]], broker: BrokerAdapter) -> list[ReconciliationIssue]:
+def reconcile_positions(database_positions: list[dict[str, Any]], broker: BrokerAdapter, broker_positions: list[dict[str, Any]] | None = None) -> list[ReconciliationIssue]:
     db_by_id = {str(p["broker_position_id"]): p for p in database_positions}
-    broker_by_id = {str(p.get("id") or p.get("ticket")): p for p in broker.get_open_positions()}
+    broker_by_id = {str(p.get("id") or p.get("ticket")): p for p in (broker_positions if broker_positions is not None else broker.get_open_positions())}
     issues: list[ReconciliationIssue] = []
     for position_id in db_by_id.keys() - broker_by_id.keys():
         issues.append(ReconciliationIssue("MISSING_ON_BROKER", position_id, "Database position is absent from broker"))

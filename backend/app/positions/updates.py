@@ -36,7 +36,19 @@ def apply_position_update(
     elif update.action == "CLOSE":
         results.append(manager.close(position))
     elif update.action == "TARGET_HIT" and update.target_sequence is not None:
-        results.append(manager.trigger_target(position, update.target_sequence))
+        target = manager.trigger_target(position, update.target_sequence)
+        results.append(target)
+        if target.accepted and position.status == "OPEN":
+            protection = manager.protect_after_target(position, update.target_sequence)
+            if protection is not None:
+                results.append(protection)
+    elif update.action == "TARGET_HIT_AND_BREAK_EVEN" and update.target_sequence is not None:
+        target = manager.trigger_target(position, update.target_sequence)
+        results.append(target)
+        if target.accepted and position.status == "OPEN":
+            protection = manager.protect_after_target(position, update.target_sequence)
+            if protection is not None:
+                results.append(protection)
     elif update.action == "HOLD":
         manager.hold(position)
     elif update.action == "CANCEL_PENDING":

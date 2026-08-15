@@ -6,7 +6,7 @@ from app.core.enums import TargetStatus
 
 PRESETS: dict[str, list[Decimal]] = {
     "EQUAL": [],
-    "PROTECT": [Decimal("0.40"), Decimal("0.30"), Decimal("0.20"), Decimal("0.10")],
+    "PROTECT": [Decimal("0.40"), Decimal("0.20"), Decimal("0.20"), Decimal("0.20")],
     "RUNNER": [Decimal("0.20"), Decimal("0.20"), Decimal("0.20"), Decimal("0.40")],
 }
 

@@ -3,6 +3,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from app.brokers.base import BrokerAdapter, BrokerResult, OrderRequest
+from app.brokers.mock import MockBrokerAdapter
+from app.brokers.mt5 import MetaTrader5Adapter
 from app.core.enums import Confidence, TradingMode
 from app.risk.position_sizing import calculate_position_size
 from app.schemas.risk import PositionSizeResult, RiskContext
@@ -67,6 +69,8 @@ class ExecutionEngine:
             return BrokerResult(False, None, None, "PREFLIGHT_REJECTED", "; ".join(preflight.reasons), {})
         if trading_mode == TradingMode.DISABLED:
             return BrokerResult(False, None, None, "DISABLED", "Account execution is disabled", {})
+        if trading_mode == TradingMode.LIVE:
+            return BrokerResult(False, None, None, "LIVE_GUARD", "LIVE execution is not enabled", {})
         request = OrderRequest(
             idempotency_key=execution_id,
             symbol=signal.symbol,
@@ -74,10 +78,14 @@ class ExecutionEngine:
             order_type=signal.order_type,
             size=preflight.sizing.size,
             stop_loss=signal.stop_loss,
-            take_profit=signal.take_profits[0] if signal.take_profits else None,
+            # TP1-TP3 are managed as virtual partial closes. TP4 (the final
+            # supplied target) remains broker-side as the disaster-safe exit.
+            take_profit=signal.take_profits[-1] if signal.take_profits else None,
             entry_price=signal.entry_price,
             max_slippage_points=max_slippage_points,
         )
-        if trading_mode == TradingMode.SHADOW and broker.__class__.__name__ != "MockBrokerAdapter":
+        if trading_mode == TradingMode.SHADOW and type(broker) is not MockBrokerAdapter:
             return BrokerResult(False, None, None, "SHADOW_GUARD", "Shadow mode cannot submit to a live adapter", {})
+        if trading_mode == TradingMode.DEMO and (not isinstance(broker, MetaTrader5Adapter) or not broker.require_demo):
+            return BrokerResult(False, None, None, "DEMO_GUARD", "Demo mode requires an MT5 adapter locked to a demo login", {})
         return broker.place_order(request)

@@ -31,6 +31,12 @@ def test_tp_allocation_merges_tiny_parts_and_preserves_total_volume() -> None:
     assert "3 executable" in plan.explanation
 
 
+def test_fred_protect_allocation_is_40_20_20_20() -> None:
+    plan = allocate_take_profits(Decimal("0.10"), [Decimal("10"), Decimal("20"), Decimal("30"), Decimal("40")], Decimal("0.01"), Decimal("0.01"))
+    assert [target.requested_percentage for target in plan.targets] == [Decimal("0.40"), Decimal("0.20"), Decimal("0.20"), Decimal("0.20")]
+    assert [target.allocated_volume for target in plan.targets] == [Decimal("0.04"), Decimal("0.02"), Decimal("0.02"), Decimal("0.02")]
+
+
 def test_mock_broker_uses_side_aware_entry_and_exit_prices() -> None:
     broker = MockBrokerAdapter()
     broker.connect()
@@ -71,17 +77,18 @@ def test_multi_account_high_risk_signal_and_complete_position_lifecycle() -> Non
     brokers[0].set_price("XAUUSD", Decimal("3345.10"), Decimal("3345.30"))
     first_results = manager.monitor(position)
     second_results = manager.monitor(position)
-    assert len(first_results) == 1 and first_results[0].accepted
+    assert len(first_results) == 2 and all(result.accepted for result in first_results)
     assert second_results == []
     assert sum(event["action"] == "VIRTUAL_TP_EXECUTED" for event in run.recorders[approved.position_id].events) == 1
+    assert position.stop_loss == position.entry_price
     remaining_after_tp1 = position.remaining_volume
     brokers[0].set_price("XAUUSD", Decimal("3346.10"), Decimal("3346.30"))
-    assert len(manager.monitor(position)) == 1
+    assert len(manager.monitor(position)) == 2
     assert position.remaining_volume < remaining_after_tp1
     assert sum(event["action"] == "VIRTUAL_TP_EXECUTED" for event in run.recorders[approved.position_id].events) == 2
+    assert position.stop_loss == Decimal("3345")
     remaining_after_tp = position.remaining_volume
-    assert manager.move_break_even(position).accepted
-    assert position.stop_loss == position.entry_price
+    assert manager.move_break_even(position).code == "WORSENS_STOP"
     assert manager.partial_close(position, Decimal("0.5")).accepted
     assert position.remaining_volume < remaining_after_tp
     assert manager.close(position).accepted

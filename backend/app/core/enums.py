@@ -19,6 +19,7 @@ class AccountStatus(StrEnum):
 
 class TradingMode(StrEnum):
     LIVE = "LIVE"
+    DEMO = "DEMO"
     SHADOW = "SHADOW"
     DISABLED = "DISABLED"
 

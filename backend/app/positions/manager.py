@@ -61,6 +61,10 @@ class PositionManagementService:
             status = TargetStatus.EXECUTED if result.accepted else TargetStatus.FAILED
             position.targets[index] = TargetAllocation(target.sequence, target.price, target.requested_percentage, target.allocated_volume, status, target.merged_into_sequence)
             self.recorder.record("VIRTUAL_TP_EXECUTED" if result.accepted else "VIRTUAL_TP_FAILED", position, {"sequence": target.sequence, "price": str(target.price), "volume": str(target.allocated_volume), "code": result.code})
+            if result.accepted and position.status == "OPEN":
+                protection = self.protect_after_target(position, target.sequence)
+                if protection is not None:
+                    results.append(protection)
             if not result.accepted or position.status != "OPEN":
                 break
         return results
@@ -71,6 +75,22 @@ class PositionManagementService:
                 continue
             if target.status != TargetStatus.WAITING:
                 return BrokerResult(False, position.position_id, None, "TARGET_NOT_WAITING", "Target was already handled", {})
+            if target.allocated_volume >= position.remaining_volume:
+                if not self.broker.health_check():
+                    return BrokerResult(False, position.position_id, None, "DISCONNECTED", "Broker health is unavailable; position closure was not assumed", {})
+                broker_ids = {str(item.get("id") or item.get("ticket")) for item in self.broker.get_open_positions()}
+                if not self.broker.health_check():
+                    return BrokerResult(False, position.position_id, None, "DISCONNECTED", "Broker health failed during position lookup; closure was not assumed", {})
+                if position.position_id not in broker_ids:
+                    snapshot = self.broker.get_closed_position(position.position_id) or {}
+                    exit_price = snapshot.get("price") or self.broker.get_exit_price(position.symbol, position.direction) or target.price
+                    closed_volume = position.remaining_volume
+                    position.remaining_volume = Decimal("0")
+                    position.status = "CLOSED"
+                    self._update_pnl(position, Decimal(str(exit_price)), closed_volume)
+                    position.targets[index] = TargetAllocation(target.sequence, target.price, target.requested_percentage, target.allocated_volume, TargetStatus.EXECUTED, target.merged_into_sequence)
+                    self.recorder.record("BROKER_ALREADY_FLAT", position, {"sequence": target.sequence, "price": str(exit_price), "volume": str(closed_volume), "source": "GURU_UPDATE"})
+                    return BrokerResult(True, position.position_id, Decimal(str(exit_price)), "ALREADY_CLOSED", "Broker had already closed the final target", {"deduplicated": True})
             result = self._close_volume(position, target.allocated_volume, f"TP{target.sequence}")
             status = TargetStatus.EXECUTED if result.accepted else TargetStatus.FAILED
             position.targets[index] = TargetAllocation(target.sequence, target.price, target.requested_percentage, target.allocated_volume, status, target.merged_into_sequence)
@@ -80,6 +100,22 @@ class PositionManagementService:
 
     def hold(self, position: ManagedPosition) -> None:
         self.recorder.record("HOLD_CONFIRMED", position, {})
+
+    def protect_after_target(self, position: ManagedPosition, sequence: int) -> BrokerResult | None:
+        """Apply the Fred milestone stop policy without ever loosening a stop."""
+        if sequence == 1:
+            desired = position.entry_price
+        elif sequence == 2:
+            first_target = next((target for target in position.targets if target.sequence == 1), None)
+            if first_target is None:
+                return None
+            desired = first_target.price
+        else:
+            return None
+        already_protected = desired <= position.stop_loss if position.direction == Direction.BUY else desired >= position.stop_loss
+        if already_protected:
+            return None
+        return self.move_stop(position, desired)
 
     def move_break_even(self, position: ManagedPosition, offset: Decimal = Decimal("0")) -> BrokerResult:
         proposed = position.entry_price + offset if position.direction == Direction.BUY else position.entry_price - offset

@@ -88,5 +88,17 @@ class BrokerAdapter(ABC):
     @abstractmethod
     def get_open_positions(self) -> list[dict[str, Any]]: ...
 
+    def get_account_positions(self) -> list[dict[str, Any]]:
+        """Return every account position for equity risk, including non-PPB exposure."""
+        return self.get_open_positions()
+
+    def get_closed_position(self, position_id: str) -> dict[str, Any] | None:
+        """Return the latest broker-side closing fill when the adapter supports history."""
+        return None
+
+    def expected_position_comment(self, idempotency_key: str) -> str | None:
+        """Return the adapter ownership comment for an execution key, if used."""
+        return None
+
     def get_pending_orders(self) -> list[dict[str, Any]]:
         return []

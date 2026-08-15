@@ -1,11 +1,15 @@
+import asyncio
+from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
 from uuid import uuid4
 
 import structlog
+from redis.asyncio import Redis
 from telethon import TelegramClient, events
 
 from app.core.config import settings
+from app.core.health import TELEGRAM_HEARTBEAT_KEY, TELEGRAM_HEARTBEAT_TTL_SECONDS
 
 
 logger = structlog.get_logger()
@@ -37,5 +41,20 @@ class TelegramSignalListener:
             await self.handler(payload)
 
         await self.client.start()
+        redis = Redis.from_url(settings.redis_url, decode_responses=True)
+        await redis.set(TELEGRAM_HEARTBEAT_KEY, datetime.now(timezone.utc).isoformat(), ex=TELEGRAM_HEARTBEAT_TTL_SECONDS)
+        heartbeat = asyncio.create_task(self._heartbeat(redis))
         logger.info("telegram_listener_connected", timestamp=datetime.now(timezone.utc).isoformat())
-        await self.client.run_until_disconnected()
+        try:
+            await self.client.run_until_disconnected()
+        finally:
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
+            await redis.delete(TELEGRAM_HEARTBEAT_KEY)
+            await redis.aclose()
+
+    async def _heartbeat(self, redis: Redis) -> None:
+        while self.client.is_connected():
+            await redis.set(TELEGRAM_HEARTBEAT_KEY, datetime.now(timezone.utc).isoformat(), ex=TELEGRAM_HEARTBEAT_TTL_SECONDS)
+            await asyncio.sleep(10)

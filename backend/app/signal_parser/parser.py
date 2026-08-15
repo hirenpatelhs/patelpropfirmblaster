@@ -22,6 +22,10 @@ class ParseError(ValueError):
     pass
 
 
+class ManualReviewRequired(ParseError):
+    """The message contains a trade instruction that is unsafe to automate."""
+
+
 class DeterministicSignalParser:
     """Fail-closed parser. LLM results, if added, must be fed back through this validator."""
 
@@ -40,11 +44,15 @@ class DeterministicSignalParser:
         direction = Direction(direction_match.group(1))
         entry_min, entry_max, entry_price = self._entry(clean, symbol, direction.value)
         stop_loss = self._labelled_number(clean, ("SL", "STOP", "STOP LOSS"))
-        take_profits = [Decimal(value) for value in re.findall(r"\bTP\d*\s*[:=@-]?\s*" + NUMBER, clean)]
-        if not take_profits:
-            take_profits = [Decimal(value) for value in re.findall(r"\bTARGET\d*\s*[:=@-]?\s*" + NUMBER, clean)]
+        take_profits: list[Decimal] = []
+        for label in (r"TP\d*", r"TAKE\s+PROFIT\d*", r"TARGET\d*"):
+            # Do not backtrack TP1 to TP and mistake its sequence number for a
+            # price in management phrases such as "SL entry TP1".
+            pattern = rf"\b{label}(?!\d)\s*[:=@-]?\s*" + NUMBER
+            take_profits.extend(Decimal(value) for value in re.findall(pattern, clean))
         confidence = Confidence.HIGH if stop_loss is not None and take_profits else Confidence.MEDIUM
         risk_classification = self._risk_classification(clean)
+        risk_hint = "MOVE_SL_TO_ENTRY_AT_TP1" if re.search(r"\bSL\s+(?:TO\s+)?ENTRY\s+(?:AT\s+)?TP\s*1\b", clean) else None
         return NormalizedSignal(
             source_id=source_id,
             telegram_message_id=message_id,
@@ -56,6 +64,7 @@ class DeterministicSignalParser:
             entry_max=entry_max,
             stop_loss=stop_loss,
             take_profits=take_profits,
+            risk_hint=risk_hint,
             timestamp=timestamp or datetime.now(timezone.utc),
             confidence=confidence,
             risk_classification=risk_classification,
@@ -65,8 +74,23 @@ class DeterministicSignalParser:
     def parse_update(self, text: str) -> SignalUpdate:
         clean = " ".join(text.upper().split())
         symbol = self._symbol(clean)
+        if re.search(r"\b(?:OPTIONS?\s+FOR\s+YOU|YOU\s+CHOOSE|DOES\s+THIS\s+MEAN|IF\s+YOU(?:['’]RE|\s+ARE)?|IF\s+WISHING|YOU\s+CAN\s+CLOSE)\b", clean):
+            raise ManualReviewRequired("Conditional or optional trade instruction requires manual review")
+        if re.search(r"\b(?:REENTER|RE-ENTER|REWNTER)\b", clean):
+            raise ManualReviewRequired("Re-entry instruction requires a new risk decision and manual review")
+        if re.search(r"\b(?:MOVE|EXTEND)\s+(?:TP|TARGET)\s*\d+\b", clean):
+            raise ManualReviewRequired("Target-price modification is not supported automatically")
+        if re.search(r"\bCLOSE\s+TP\s*[1-9]\d*\s+MANUALLY(?:\s+NOW)?\b", clean):
+            raise ManualReviewRequired("Manual target-close instruction requires manual review")
+
+        target_hits = list(re.finditer(r"\bTP\s*([1-9]\d*)(?:\s+HIT|\s*(?:✅|☑|✔|âœ…|â˜‘|âœ”))", clean))
+        if len(target_hits) > 1:
+            raise ManualReviewRequired("Multiple target results in one message require manual review")
+
         partial = bool(re.search(r"\b(?:CLOSE\s+(?:50%|HALF)|TAKE\s+PARTIAL|BOOK\s+PARTIAL|SECURE\s+PARTIAL)(?=\s|$)", clean))
-        break_even = bool(re.search(r"\b(?:MOVE\s+(?:SL|STOP)\s+(?:TO\s+)?(?:BE|BREAK\s*EVEN)|SECURE\s+ENTRY|(?:AND|&)\s+BE)\b", clean))
+        break_even = bool(re.search(r"\b(?:MOVE\s+(?:SL|STOP)\s+(?:TO\s+)?(?:BE|BREAK\s*EVEN)|SECURE\s+ENTRY|(?:AND|&)\s+BE|SL\s+(?:TO\s+)?ENTRY|(?:USE\s+)?MY\s+ENTRY\s+SL)\b", clean))
+        if target_hits and break_even:
+            return SignalUpdate(action="TARGET_HIT_AND_BREAK_EVEN", symbol=symbol, target_sequence=int(target_hits[0].group(1)), confidence=Confidence.HIGH)
         if partial and break_even:
             return SignalUpdate(action="PARTIAL_CLOSE_AND_BREAK_EVEN", symbol=symbol, percentage=Decimal("0.50"), confidence=Confidence.HIGH)
         if break_even:
@@ -76,10 +100,12 @@ class DeterministicSignalParser:
         move = re.search(r"\bMOVE\s+(?:SL|STOP)\s+(?:TO\s+)?" + NUMBER, clean)
         if move:
             return SignalUpdate(action="MOVE_STOP", symbol=symbol, value=Decimal(move.group(1)), confidence=Confidence.HIGH)
-        if re.search(r"\b(CLOSE(?:\s+\w+)?\s+NOW|CLOSE\s+(GOLD|XAUUSD)|CLOSE\s+HERE)\b", clean):
+        if re.search(r"\b(?:FULLY\s+CLOSE|CLOSE(?:\s+\w+)?\s+NOW|CLOSE\s+(?:GOLD|XAUUSD)|CLOSE\s+HERE)\b", clean):
             return SignalUpdate(action="CLOSE", symbol=symbol, confidence=Confidence.MEDIUM if symbol is None else Confidence.HIGH)
         if re.search(r"\b(CANCEL ORDER|DELETE PENDING)\b", clean):
             return SignalUpdate(action="CANCEL_PENDING", symbol=symbol, confidence=Confidence.MEDIUM)
+        if target_hits:
+            return SignalUpdate(action="TARGET_HIT", symbol=symbol, target_sequence=int(target_hits[0].group(1)), confidence=Confidence.HIGH)
         target_hit = re.search(r"\bTP\s*([1-9]\d*)(?:\s+HIT|\s*[✅☑✔])", clean)
         if target_hit:
             return SignalUpdate(action="TARGET_HIT", symbol=symbol, target_sequence=int(target_hit.group(1)), confidence=Confidence.HIGH)
@@ -118,7 +144,7 @@ class DeterministicSignalParser:
         if range_match:
             low, high = Decimal(range_match.group(1)), Decimal(range_match.group(2))
             return min(low, high), max(low, high), None
-        labelled = re.search(r"\bENTRY\s*[:=@-]?\s*" + NUMBER, text)
+        labelled = re.search(r"\b(?:ENTRY|ENTER)\s*[:=@-]?\s*" + NUMBER, text)
         if labelled:
             return None, None, Decimal(labelled.group(1))
         at_price = re.search(r"@\s*" + NUMBER, text)
@@ -129,7 +155,12 @@ class DeterministicSignalParser:
         implicit = re.search(rf"\b{escaped}\s+{direction}(?:\s+NOW)?\s+{NUMBER}", compact)
         if implicit:
             try:
-                return None, None, Decimal(implicit.group(1))
+                value = Decimal(implicit.group(1))
+                # In the supported gold/index dialects, a small unlabeled
+                # value after BUY/SELL is a lot hint rather than an entry.
+                if value <= Decimal("10"):
+                    return None, None, None
+                return None, None, value
             except InvalidOperation:
                 pass
         return None, None, None

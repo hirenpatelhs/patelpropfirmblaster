@@ -1,8 +1,11 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import structlog
 
+from app.core.config import settings
 from app.database.session import SessionLocal
+from app.risk.trading_day import trading_date
 from app.workers.queue import WorkQueue
 from app.workers.leadership import SchedulerLeadership
 from app.workers.pipeline import TelegramPipeline
@@ -51,6 +54,8 @@ async def scheduled_jobs(queue: WorkQueue) -> None:
             continue
         logger.info("scheduler_leadership_acquired", token=leadership.token)
         tick = 0
+        reconcile_elapsed = settings.demo_monitor_interval_seconds
+        last_daily_report = None
         try:
             await queue.enqueue("reconcile", {"reason": "leader_startup_recovery"})
             while leadership.held:
@@ -59,11 +64,18 @@ async def scheduled_jobs(queue: WorkQueue) -> None:
                     logger.warning("scheduler_leadership_lost")
                     break
                 tick += 1
-                await queue.enqueue("reconcile", {"reason": "position_monitor"})
+                reconcile_elapsed += 2
+                if reconcile_elapsed >= settings.demo_monitor_interval_seconds:
+                    await queue.enqueue("reconcile", {"reason": "position_monitor"})
+                    reconcile_elapsed = 0
                 if tick % 3 == 0:
                     await queue.enqueue("notify", {})
                 if tick % 30 == 0:
                     await queue.enqueue("aggregate", {})
+                report_date = trading_date(datetime.now(timezone.utc), settings.application_timezone) - timedelta(days=1)
+                if report_date != last_daily_report:
+                    await queue.enqueue("aggregate", {"date": report_date.isoformat(), "notify_daily": True})
+                    last_daily_report = report_date
         finally:
             await leadership.release()
 

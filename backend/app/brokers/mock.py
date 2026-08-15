@@ -13,9 +13,12 @@ class MockBrokerAdapter(BrokerAdapter):
         self.connected = False
         self.balance = balance
         self.equity = balance
+        self.margin = Decimal("0")
+        self.margin_level = Decimal("0")
         self.prices = {"XAUUSD": Decimal("3344.00"), "NAS100": Decimal("21500.0"), "US30": Decimal("44000.0")}
         self.spreads = {"XAUUSD": Decimal("0.20"), "NAS100": Decimal("1.0"), "US30": Decimal("2.0")}
         self.positions: dict[str, dict[str, Any]] = {}
+        self.closed_positions: dict[str, dict[str, Any]] = {}
         self.executions: dict[str, BrokerResult] = {}
         self._lock = Lock()
 
@@ -30,7 +33,8 @@ class MockBrokerAdapter(BrokerAdapter):
         return self.connected
 
     def get_account_info(self) -> dict[str, Any]:
-        return {"balance": self.balance, "equity": self.equity, "currency": "USD", "connected": self.connected}
+        self.get_open_positions()
+        return {"balance": self.balance, "equity": self.equity, "margin": self.margin, "margin_level": self.margin_level, "currency": "USD", "connected": self.connected}
 
     def get_symbol_info(self, symbol: str) -> InstrumentSpec | None:
         if symbol not in self.prices:
@@ -120,7 +124,25 @@ class MockBrokerAdapter(BrokerAdapter):
         if not position:
             return BrokerResult(False, position_id, None, "NOT_FOUND", "Position not found", {})
         direction = Direction(position["direction"])
-        return BrokerResult(True, position_id, self.get_exit_price(position["symbol"], direction), "CLOSED", "Position closed", {"closed_volume": str(position["size"])})
+        fill = self.get_exit_price(position["symbol"], direction)
+        self.closed_positions[position_id] = {"position_id": position_id, "price": fill, "volume": position["size"], "reason": "MANUAL", "profit": None}
+        return BrokerResult(True, position_id, fill, "CLOSED", "Position closed", {"closed_volume": str(position["size"])})
 
     def get_open_positions(self) -> list[dict[str, Any]]:
-        return list(self.positions.values())
+        rows: list[dict[str, Any]] = []
+        floating = Decimal("0")
+        for position in self.positions.values():
+            direction = Direction(position["direction"])
+            exit_price = self.get_exit_price(position["symbol"], direction)
+            spec = self.get_symbol_info(position["symbol"])
+            profit = Decimal("0")
+            if exit_price is not None and spec is not None:
+                movement = exit_price - position["entry_price"] if direction == Direction.BUY else position["entry_price"] - exit_price
+                profit = (movement / spec.tick_size) * spec.tick_value * position["size"]
+            floating += profit
+            rows.append(dict(position, profit=profit, price_current=exit_price, price_open=position["entry_price"]))
+        self.equity = self.balance + floating
+        return rows
+
+    def get_closed_position(self, position_id: str) -> dict[str, Any] | None:
+        return self.closed_positions.get(position_id)

@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import admin_user, current_user
 from app.core.config import settings
+from app.core.health import TELEGRAM_HEARTBEAT_KEY
+from app.core.time import display_time, london_day_bounds_utc
 from app.database.session import get_db
 from app.models.entities import AccountDailyStat, AuditLog, Signal, SystemSetting, TradingAccount, User
 
@@ -28,17 +30,19 @@ async def health(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     redis = Redis.from_url(settings.redis_url)
     try:
         checks["redis"] = "CONNECTED" if await redis.ping() else "DISCONNECTED"
+        checks["telegram"] = "CONNECTED" if await redis.get(TELEGRAM_HEARTBEAT_KEY) else "DISCONNECTED"
     except Exception:
         checks["redis"] = "DISCONNECTED"
     finally:
         await redis.aclose()
-    return {"status": "CONNECTED" if checks["database"] == checks["redis"] == "CONNECTED" else "DEGRADED", "timestamp": datetime.now(timezone.utc), "checks": checks}
+    return {"status": "CONNECTED" if checks["database"] == checks["redis"] == checks.get("telegram") == "CONNECTED" else "DEGRADED", "timestamp": display_time(datetime.now(timezone.utc)), "timezone": settings.application_timezone, "checks": checks}
 
 
 @router.get("/overview", dependencies=[Depends(current_user)])
 async def overview(db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     accounts = (await db.scalars(select(TradingAccount))).all()
-    signals_today = await db.scalar(select(func.count()).select_from(Signal).where(Signal.signal_timestamp >= datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)))
+    day_start, _ = london_day_bounds_utc()
+    signals_today = await db.scalar(select(func.count()).select_from(Signal).where(Signal.signal_timestamp >= day_start))
     return {
         "accounts": {"total": len(accounts), "active": sum(a.status.value == "ACTIVE" for a in accounts), "evaluation": sum(a.stage.value == "EVALUATION" for a in accounts), "funded": sum(a.stage.value == "FUNDED" for a in accounts), "paused": sum(a.status.value == "PAUSED" for a in accounts)},
         "financials": {"starting_balance": sum((a.initial_balance for a in accounts), Decimal("0")), "balance": sum((a.current_balance for a in accounts), Decimal("0")), "equity": sum((a.current_equity for a in accounts), Decimal("0")), "floating_pnl": sum((a.current_equity - a.current_balance for a in accounts), Decimal("0"))},
